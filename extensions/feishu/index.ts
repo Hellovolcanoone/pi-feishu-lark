@@ -274,6 +274,16 @@ function splitText(text: string, max: number) {
   return out;
 }
 
+function normalizeForDedupe(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function pruneRecentMap(map: Map<string, number>, now: number, ttlMs: number) {
+  for (const [key, timestamp] of map) {
+    if (now - timestamp > ttlMs) map.delete(key);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pi sessions per Feishu conversation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -543,6 +553,8 @@ export default function feishuExtension(pi: ExtensionAPI) {
   let transport: FeishuTransport | undefined;
   const conversations = new ConversationManager(process.cwd());
   const seen = new Set<string>();
+  const recentContent = new Map<string, number>();
+  const CONTENT_DEDUPE_TTL_MS = 30_000;
 
   const STATUS_KEY = "feishu-connection";
   let uiRef: { setStatus?: (key: string, text: string | undefined) => void } | undefined;
@@ -586,6 +598,14 @@ export default function feishuExtension(pi: ExtensionAPI) {
       const text = parseMessageText(msg, transport?.getBotOpenId());
       if (!text) return;
       const key = conversationKey(msg);
+
+      const now = Date.now();
+      const contentKey = [key, msg.senderOpenId, normalizeForDedupe(text)].join("\u0000");
+      const previousContentAt = recentContent.get(contentKey);
+      if (previousContentAt && now - previousContentAt <= CONTENT_DEDUPE_TTL_MS) return;
+      recentContent.set(contentKey, now);
+      if (recentContent.size > 2000) pruneRecentMap(recentContent, now, CONTENT_DEDUPE_TTL_MS);
+
       const prompt = msg.chatType === "group"
         ? `[Feishu group/topic: ${key}]\n${text}`
         : `[Feishu private chat]\n${text}`;
@@ -648,6 +668,7 @@ export default function feishuExtension(pi: ExtensionAPI) {
           removePath(STATE_PATH);
           conversations.resetMemory();
           seen.clear();
+          recentContent.clear();
           ensureRoot();
           updateStatus("not configured");
           ctx.ui.notify(
