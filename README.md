@@ -61,11 +61,11 @@ Open a DM or group with your bot in Feishu/Lark and send a message. Pi replies i
 | Command / 命令 | Description / 说明 |
 |---------|-------------|
 | `/feishu setup` | Bilingual setup wizard / 中英双语配置向导 |
-| `/feishu start` or `/feishu connect` | Start the single Feishu gateway / 启动单实例飞书 gateway |
-| `/feishu stop` or `/feishu disconnect` | Stop the gateway if this Pi process owns it / 停止当前进程拥有的 gateway |
-| `/feishu takeover` | Force this Pi process to become the gateway owner / 强制当前 Pi 进程接管 gateway |
+| `/feishu start` | Start the Feishu gateway / 启动飞书连接 |
+| `/feishu stop` | Stop the Feishu gateway / 停止飞书连接 |
+| `/feishu restart` | Restart the Feishu gateway and reload latest code/config / 重启飞书连接并加载最新代码和配置 |
 | `/feishu status` | Show connection, owner and config / 查看连接、gateway owner 和配置 |
-| `/feishu autostart on\|off` | Enable/disable auto-start / 开启/关闭自动启动 |
+| `/feishu autostart` | Toggle auto-start / 切换自动启动 |
 | `/feishu debug` | Show last 20 debug log lines / 显示最近 20 条调试日志 |
 | `/feishu reset` | Clear config and mappings (keeps session history) / 清除配置和会话映射（保留会话历史） |
 

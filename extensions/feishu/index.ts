@@ -110,24 +110,12 @@ export default function feishuExtension(pi: ExtensionAPI) {
     return `pid=${owner.pid}, status=${owner.status}, startedAt=${owner.startedAt}, heartbeatAt=${owner.heartbeatAt}, cwd=${owner.cwd}`;
   }
 
-  function notifyStartResult(ctx: any, result: Awaited<ReturnType<typeof start>>) {
-    if (result === "already") {
-      ctx.ui.notify("Feishu already running in this Pi process / 当前 Pi 进程已在运行飞书 gateway", "info");
-      return;
-    }
-    if (result === "started") {
-      ctx.ui.notify("Feishu gateway started in this Pi process / 飞书 gateway 已在当前 Pi 进程启动", "info");
-      return;
-    }
-    ctx.ui.notify(`Feishu gateway is already owned by another Pi process.\n${formatOwner(result.owner)}\n如需强制接管，请运行 /feishu takeover。`, "warning");
-  }
-
   function notifyDaemonStartResult(ctx: any, result: Awaited<ReturnType<typeof startDaemon>>) {
     if (result.status === "busy") {
-      ctx.ui.notify(`Feishu gateway is already running in background.\n${formatOwner(result.owner)}\n如需接管，请运行 /feishu daemon takeover。`, "info");
+      ctx.ui.notify(`飞书连接已在后台运行。\n${formatOwner(result.owner)}`, "info");
       return;
     }
-    ctx.ui.notify(`Feishu gateway daemon starting. Spawn pid=${result.pid}.\nOwner: ${formatOwner(result.owner)}\nLog: ${DAEMON_LOG_PATH}`, "info");
+    ctx.ui.notify(`飞书连接已启动。\nGateway pid=${result.pid}\nLog: ${DAEMON_LOG_PATH}`, "info");
   }
 
   function quoteShell(value: string) {
@@ -205,13 +193,19 @@ export default function feishuExtension(pi: ExtensionAPI) {
     }
   }
 
+  async function restartDaemon() {
+    const stopped = await stopDaemon();
+    if (stopped.status === "error") return { status: "error" as const, stopped };
+    const started = await startDaemon(true);
+    return { status: "restarted" as const, stopped, started };
+  }
+
   pi.registerCommand("feishu", {
-    description: "Feishu/Lark bridge: setup, start/stop background gateway, connect/disconnect local, status, debug, reset, autostart",
+    description: "Feishu/Lark: setup, start, stop, restart, status, debug, autostart, reset",
     handler: async (args, ctx) => {
       uiRef = ctx.ui as any;
-      const [cmdRaw, argRaw] = args.trim().toLowerCase().split(/\s+/, 2);
+      const [cmdRaw] = args.trim().toLowerCase().split(/\s+/, 1);
       const cmd = cmdRaw || "status";
-      const arg = argRaw || "";
       try {
         if (cmd === "setup") {
           const configToStart = await runSetup(ctx);
@@ -225,27 +219,23 @@ export default function feishuExtension(pi: ExtensionAPI) {
           notifyDaemonStartResult(ctx, await startDaemon(false));
           return;
         }
-        if (cmd === "connect") {
-          notifyStartResult(ctx, await start());
-          return;
-        }
-        if (cmd === "takeover") {
-          await stop();
-          notifyStartResult(ctx, await start(undefined, { takeover: true }));
-          return;
-        }
         if (cmd === "stop") {
           const result = await stopDaemon();
           if (result.status === "error") {
-            ctx.ui.notify(`Failed to stop Feishu gateway daemon: ${result.error instanceof Error ? result.error.message : String(result.error)}\nOwner: ${formatOwner(result.owner)}`, "error");
+            ctx.ui.notify(`停止飞书连接失败：${result.error instanceof Error ? result.error.message : String(result.error)}\nOwner: ${formatOwner(result.owner)}`, "error");
             return;
           }
-          ctx.ui.notify(`Feishu gateway daemon stop: ${result.status}`, "info");
+          ctx.ui.notify(result.status === "none" ? "飞书连接未在运行。" : "飞书连接已停止。", "info");
           return;
         }
-        if (cmd === "disconnect") {
-          await stop();
-          ctx.ui.notify("Feishu gateway stopped in this Pi process / 当前 Pi 进程内的飞书 gateway 已停止", "info");
+        if (cmd === "restart") {
+          const result = await restartDaemon();
+          if (result.status === "error") {
+            const stopped = result.stopped;
+            ctx.ui.notify(`飞书连接重启失败：${stopped.error instanceof Error ? stopped.error.message : String(stopped.error)}\nOwner: ${formatOwner(stopped.owner)}`, "error");
+            return;
+          }
+          ctx.ui.notify(`飞书连接已重启，最新代码和配置已生效。\nOwner: ${formatOwner(result.started.owner)}\nLog: ${DAEMON_LOG_PATH}`, "info");
           return;
         }
         if (cmd === "reset") {
@@ -258,7 +248,7 @@ export default function feishuExtension(pi: ExtensionAPI) {
             ctx.ui.notify("Reset cancelled / 已取消重置", "info");
             return;
           }
-          await stop();
+          await stopDaemon();
           removePath(CONFIG_PATH);
           removePath(STATE_PATH);
           removePath(DEDUPE_PATH);
@@ -285,51 +275,7 @@ export default function feishuExtension(pi: ExtensionAPI) {
               `Path: ${CONFIG_PATH}`,
               `Gateway lock: ${gatewayLockPath()}`,
               `Debug: ${DEBUG_LOG_PATH}`,
-              `Daemon log: ${DAEMON_LOG_PATH}`,
-            ].join("\n"),
-            "info",
-          );
-          return;
-        }
-        if (cmd === "daemon") {
-          if (arg === "start") {
-            const result = await startDaemon(false);
-            if (result.status === "busy") {
-              ctx.ui.notify(`Feishu daemon already owned by another process.\n${formatOwner(result.owner)}\n如需接管，请运行 /feishu daemon takeover。`, "warning");
-              return;
-            }
-            ctx.ui.notify(`Feishu daemon starting. Spawn pid=${result.pid}.\nOwner: ${formatOwner(result.owner)}\nLog: ${DAEMON_LOG_PATH}`, "info");
-            return;
-          }
-          if (arg === "takeover") {
-            const result = await startDaemon(true);
-            ctx.ui.notify(`Feishu daemon takeover requested. Spawn pid=${result.status === "started" ? result.pid : "unknown"}.\nOwner: ${formatOwner(result.status === "started" ? result.owner : undefined)}\nLog: ${DAEMON_LOG_PATH}`, "info");
-            return;
-          }
-          if (arg === "stop") {
-            const result = await stopDaemon();
-            if (result.status === "error") {
-              ctx.ui.notify(`Failed to stop Feishu daemon: ${result.error instanceof Error ? result.error.message : String(result.error)}\nOwner: ${formatOwner(result.owner)}`, "error");
-              return;
-            }
-            ctx.ui.notify(`Feishu daemon stop: ${result.status}`, "info");
-            return;
-          }
-          if (arg === "logs") {
-            if (!existsSync(DAEMON_LOG_PATH)) {
-              ctx.ui.notify(`No daemon log yet: ${DAEMON_LOG_PATH}`, "info");
-              return;
-            }
-            const lines = readFileSync(DAEMON_LOG_PATH, "utf8").trim().split("\n").slice(-40);
-            ctx.ui.notify(lines.join("\n"), "info");
-            return;
-          }
-          const owner = readGatewayOwner();
-          ctx.ui.notify(
-            [
-              `Daemon owner: ${formatOwner(owner)}`,
-              `Daemon log: ${DAEMON_LOG_PATH}`,
-              "Usage: /feishu daemon start | stop | status | takeover | logs",
+              `Gateway log: ${DAEMON_LOG_PATH}`,
             ].join("\n"),
             "info",
           );
@@ -350,22 +296,12 @@ export default function feishuExtension(pi: ExtensionAPI) {
             ctx.ui.notify("Missing config. Run /feishu setup first.", "warning");
             return;
           }
-          if (arg === "on") {
-            cfg.autoStart = true;
-            writeJson(CONFIG_PATH, cfg);
-            ctx.ui.notify("AutoStart enabled.", "info");
-            return;
-          }
-          if (arg === "off") {
-            cfg.autoStart = false;
-            writeJson(CONFIG_PATH, cfg);
-            ctx.ui.notify("AutoStart disabled.", "info");
-            return;
-          }
-          ctx.ui.notify(`AutoStart: ${cfg.autoStart !== false}. Usage: /feishu autostart on|off|status`, "info");
+          cfg.autoStart = cfg.autoStart === false;
+          writeJson(CONFIG_PATH, cfg);
+          ctx.ui.notify(cfg.autoStart ? "飞书自动启动已开启。" : "飞书自动启动已关闭。", "info");
           return;
         }
-        ctx.ui.notify("Usage: /feishu setup | start/stop | status | debug | reset | autostart on|off|status | connect/disconnect (local debug) | daemon takeover|logs", "info");
+        ctx.ui.notify("可用命令：/feishu setup | start | stop | restart | status | debug | autostart | reset", "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
