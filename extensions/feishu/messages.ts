@@ -37,6 +37,9 @@ export function parseMessageInput(msg: FeishuMessage, botOpenId?: string): { tex
       const post = json.post || json;
       const locale: any = post.zh_cn || post.en_us || Object.values(post)[0];
       const parts: string[] = [];
+      if (typeof locale?.title === "string" && locale.title.trim()) {
+        parts.push(locale.title.trim());
+      }
       for (const para of locale?.content || []) {
         for (const elem of para) {
           if (elem.tag === "text" || elem.tag === "a") parts.push(elem.text || "");

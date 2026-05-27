@@ -9,7 +9,7 @@ import type { FeishuBridgeStore } from "./bridge-store.js";
 import type { FeishuTransport } from "./transport.js";
 import type { FeishuMessage } from "./types.js";
 
-const CONTENT_DEDUPE_TTL_MS = 30_000;
+const CONTENT_DEDUPE_TTL_MS = 5_000;
 
 export class FeishuMessageHandler {
   private readonly seen = new Set<string>();
