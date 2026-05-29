@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseModelActionValue } from "./cards.js";
@@ -132,6 +132,10 @@ export default function feishuExtension(pi: ExtensionAPI) {
       transport = undefined;
       gatewayLock = undefined;
       updateStatus(loadConfig() ? "owned" : "not configured");
+      if (process.env.PI_FEISHU_DAEMON === "1") {
+        terminateLauncherParent();
+        process.exit(0);
+      }
     });
     transport = new FeishuTransport(cfg, (msg) => messageHandler.handle(msg), async (action) => {
       const copy = parseCopyMarkdownActionValue(action.value);
@@ -225,7 +229,7 @@ export default function feishuExtension(pi: ExtensionAPI) {
     return `'${value.replace(/'/g, `'\\''`)}'`;
   }
 
-  function daemonCommand() {
+  function daemonSpec() {
     const extensionPath = fileURLToPath(import.meta.url);
     const piBin = process.env.PI_BIN || "pi";
     const args = [
@@ -238,6 +242,11 @@ export default function feishuExtension(pi: ExtensionAPI) {
       "--no-builtin-tools",
       "-e", extensionPath,
     ];
+    return { extensionPath, piBin, args };
+  }
+
+  function daemonCommand() {
+    const { piBin, args } = daemonSpec();
     return `tail -f /dev/null | exec ${quoteShell(piBin)} ${args.map(quoteShell).join(" ")}`;
   }
 
@@ -245,7 +254,6 @@ export default function feishuExtension(pi: ExtensionAPI) {
     return withDaemonSpawnLock(async () => {
       const cfg = loadConfig();
       if (!cfg) throw new Error(`Missing config. Run /feishu setup first. 配置不存在，请先运行 /feishu setup。`);
-
       let owner = readGatewayOwner();
       if (owner && owner.pid !== process.pid && !takeover) {
         return { status: "busy" as const, owner };
@@ -265,6 +273,7 @@ export default function feishuExtension(pi: ExtensionAPI) {
         return { status: "busy" as const, owner };
       }
 
+      reapDetachedDaemonProcesses({ keepPids: [process.pid] });
       ensureRoot();
       const logFd = openSync(DAEMON_LOG_PATH, "a");
       const child = spawn("bash", ["-lc", daemonCommand()], {
@@ -282,14 +291,19 @@ export default function feishuExtension(pi: ExtensionAPI) {
 
   async function stopDaemon() {
     const owner = readGatewayOwner();
-    if (!owner) return { status: "none" as const };
+    if (!owner) {
+      reapDetachedDaemonProcesses();
+      return { status: "none" as const };
+    }
     if (owner.pid === process.pid) {
       await stop();
+      reapDetachedDaemonProcesses({ keepPids: [process.pid] });
       return { status: "stopped-current" as const };
     }
     try {
       process.kill(owner.pid, "SIGTERM");
       await sleep(800);
+      reapDetachedDaemonProcesses();
       return { status: "stopped" as const, owner };
     } catch (error) {
       return { status: "error" as const, owner, error };
@@ -459,6 +473,92 @@ function parseCopyMarkdownActionValue(value: unknown): { copySourceId: string } 
   if (raw.action !== "pi_feishu_copy_markdown") return undefined;
   if (typeof raw.copySourceId !== "string" || !raw.copySourceId) return undefined;
   return { copySourceId: raw.copySourceId };
+}
+
+type DaemonProcessInfo = {
+  pid: number;
+  ppid: number;
+  command: string;
+};
+
+function reapDetachedDaemonProcesses(options: { keepPids?: number[]; extensionPath?: string } = {}) {
+  if (process.platform === "win32") return;
+
+  const keep = new Set(options.keepPids || []);
+  const allProcesses = listProcesses();
+  const roots = allProcesses.filter((proc) => looksLikeFeishuDaemon(proc.command, options.extensionPath));
+  if (!roots.length) return;
+
+  const byParent = new Map<number, DaemonProcessInfo[]>();
+  for (const proc of allProcesses) {
+    const children = byParent.get(proc.ppid) || [];
+    children.push(proc);
+    byParent.set(proc.ppid, children);
+  }
+
+  const toKill = new Set<number>();
+  for (const proc of roots) {
+    if (keep.has(proc.pid)) continue;
+    toKill.add(proc.pid);
+    collectDescendantPids(proc.pid, byParent, toKill, keep);
+  }
+
+  for (const pid of [...toKill].sort((a, b) => b - a)) {
+    if (keep.has(pid) || pid === process.pid) continue;
+    try { process.kill(pid, "SIGTERM"); } catch {}
+  }
+}
+
+function collectDescendantPids(pid: number, byParent: Map<number, DaemonProcessInfo[]>, toKill: Set<number>, keep: Set<number>) {
+  for (const child of byParent.get(pid) || []) {
+    if (keep.has(child.pid)) continue;
+    toKill.add(child.pid);
+    collectDescendantPids(child.pid, byParent, toKill, keep);
+  }
+}
+
+function listProcesses() {
+  const result = spawnSync("ps", ["-wwaxo", "pid=,ppid=,command="], { encoding: "utf8" });
+  if (result.status !== 0) return [] as DaemonProcessInfo[];
+
+  const processes: DaemonProcessInfo[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const command = match[3] || "";
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
+    processes.push({ pid, ppid, command });
+  }
+  return processes;
+}
+
+function looksLikeFeishuDaemon(command: string, extensionPath?: string) {
+  const hasDaemonFlags = command.includes("--mode rpc")
+    && command.includes("--no-extensions")
+    && command.includes("--no-builtin-tools");
+  if (!hasDaemonFlags) return false;
+  if (extensionPath) return command.includes(extensionPath);
+  return command.includes("feishu/index.ts");
+}
+
+function terminateLauncherParent() {
+  if (process.platform === "win32") return;
+  const parentPid = process.ppid;
+  if (!parentPid || parentPid <= 1) return;
+
+  const result = spawnSync("ps", ["-wwaxo", "pid=,command="], { encoding: "utf8" });
+  if (result.status !== 0) return;
+
+  const line = result.stdout.split("\n")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith(`${parentPid} `));
+  if (!line) return;
+  if (!line.includes("tail -f /dev/null") || !line.includes("feishu/index.ts")) return;
+  try { process.kill(parentPid, "SIGTERM"); } catch {}
 }
 
 async function withDaemonSpawnLock<T>(fn: () => Promise<T>): Promise<T> {
