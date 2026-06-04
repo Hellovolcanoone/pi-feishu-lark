@@ -122,7 +122,14 @@ export class FeishuTransport {
     const message = event?.message;
     const sender = event?.sender;
     if (!message) return;
-    if (sender?.sender_type === "bot") return;
+    const senderOpenId = sender?.sender_id?.open_id;
+    if (sender?.sender_type === "bot") {
+      if (senderOpenId && senderOpenId === this.botOpenId) return;
+      if (!this.isMentioned(message)) {
+        debugLog("feishu.message.ignored_bot_not_mentioned", { messageId: message.message_id });
+        return;
+      }
+    }
 
     debugLog("feishu.message.received", {
       messageId: message.message_id,
@@ -147,7 +154,7 @@ export class FeishuTransport {
       chatId: message.chat_id,
       chatType: message.chat_type,
       chatMode,
-      senderOpenId: sender?.sender_id?.open_id || "unknown",
+      senderOpenId: senderOpenId || "unknown",
       msgType: message.message_type,
       content: message.content || "",
       rootId: message.root_id,
